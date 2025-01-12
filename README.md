@@ -1,4 +1,4 @@
-# nanoGPT
+# NanoGPT for Idiot
 
 Yufan's research project repo. 
 
@@ -39,5 +39,7 @@ Yufan's research project repo.
    ```
 5. Now find Remote Explorer side tab and connect to my-tpu instance
 6. The above will open a new VSCode window within which git clone the desired repo
+7. git clone https://github.com/yufanlicst22/nanoGPT.git
+8. Install Python extension for the VM
       
    

@@ -1,8 +1,9 @@
 # NanoGPT for Idiot
 
-Yufan's research project repo. 
+An extremely simple repo for training small transformer language models. 
 
 # Installation
+0. Sign up for an account for Google Cloud
 1. Set up the gcloud CLI to use TPU VM follwoing the guide: https://cloud.google.com/sdk/docs/install-sdk
 2. Request TPU instance following the guide https://cloud.google.com/tpu/docs/run-calculation-jax
    1. First run to request a TPU VM

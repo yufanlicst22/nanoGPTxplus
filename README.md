@@ -8,7 +8,7 @@ Yufan's research project repo.
    a. First run
    ```
    gcloud compute tpus tpu-vm create yufanfish \
---zone=us-central1-a \
---accelerator-type=v3-8 \
---version=tpu-ubuntu2204-base
+   --zone=us-central1-a \
+   --accelerator-type=v3-8 \
+   --version=tpu-ubuntu2204-base
    ```

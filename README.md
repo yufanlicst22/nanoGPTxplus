@@ -1,4 +1,4 @@
-# NanoGPT for Idiot
+# NanoGPT
 
 An extremely simple repo for training small transformer language models. 
 

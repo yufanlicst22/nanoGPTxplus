@@ -17,7 +17,7 @@ class GPTConfig:
     num_layers: int = int(12*k) # number of transformer blocks
     num_heads: int = int(16*k) # multi-heads in one block
     num_embeds: int = 64*num_heads # embedding size
-    vocab_size=32000
+    vocab_size=50257 # 32000
     dtype: Optional[str] = None
     dropout_rate: float = 0.1
     block_size: int = 128 # context length

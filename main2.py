@@ -20,6 +20,8 @@ from datasets import load_dataset
 import torch
 from torch.multiprocessing import freeze_support
 
+from data.fineweb_streaming import get_dataloader as get_fw_dataloader
+
 # === Training ===
 @partial(jax.pmap, axis_name="batch")
 def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]:
@@ -145,19 +147,18 @@ def main():
     # Create data iterator
     def get_iter(config, split):
 
-        # Load dataset and tokenizer
-        dataset = load_dataset("ag_news", split=split)
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        is_train = (split == "train")
 
-        # Create packed dataset
-        packed_dataset = NoamPackedIterableDataset(dataset, tokenizer, context_size=config.block_size)
-
-        # Create dataloader
-        dataloader = DataLoader(
-            packed_dataset,
+        dataloader = get_fw_dataloader(
             batch_size=config.batch_size,
-            num_workers=8,
-            pin_memory=True,
+            num_workers=0,                     # safest with JAX
+            repo="HuggingFaceFW/fineweb-edu",
+            name="sample-10BT",
+            block_size=config.block_size,      # must match your model
+            shuffle_buffer=10_000 if is_train else 5_000,
+            max_tokens=None,
+            seed=1337 if is_train else 4242,
+            take_docs=None,
         )
         di = iter(dataloader)
         return di

@@ -12,11 +12,11 @@ import pickle
 import time
 from config.scalable import GPTConfig
 from model import GPT
-from data.datanoam import NoamPackedIterableDataset
+#from data.datanoam import NoamPackedIterableDataset
 
-from transformers import BertTokenizer 
+#from transformers import BertTokenizer 
 from torch.utils.data import DataLoader, IterableDataset
-from datasets import load_dataset
+#from datasets import load_dataset
 import torch
 from torch.multiprocessing import freeze_support
 
@@ -151,7 +151,7 @@ def main():
 
         dataloader = get_fw_dataloader(
             batch_size=config.batch_size,
-            num_workers=0,                     # safest with JAX
+            num_workers=4,                     # safest with JAX
             repo="HuggingFaceFW/fineweb-edu",
             name="sample-10BT",
             block_size=config.block_size,      # must match your model

@@ -14,6 +14,8 @@ class CausalSelfAttention(nn.Module):
         assert self.config.num_embeds % self.config.num_heads == 0
         self.c_attn = nn.Dense(3 * self.config.num_embeds, dtype=self.config.dtype, name='c_attn')
         self.c_proj = nn.Dense(self.config.num_embeds, dtype=self.config.dtype, name='c_proj')
+        self.c_do_1 = nn.Dropout(self.config.dropout_rate)
+        self.c_do_2 = nn.Dropout(self.config.dropout_rate)
 
     def __call__(self, x, mask, deterministic=None):
         B, T, C = x.shape 
@@ -27,12 +29,12 @@ class CausalSelfAttention(nn.Module):
         att = (q @ k.transpose(0, 1, 3, 2)) * (1.0 / jnp.sqrt(k.shape[-1])) # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         att = jnp.where(mask, att, jnp.finfo(self.config.dtype).min)
         att = jax.nn.softmax(att, axis=-1)
-        att = nn.Dropout(self.config.dropout_rate)(att, deterministic)
+        att = self.c_do_1(att, deterministic)
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(0, 2, 1, 3).reshape(B, T, C)  # re-assemble all head outputs side by side
 
         y = self.c_proj(y)
-        y = nn.Dropout(self.config.dropout_rate)(y, deterministic)
+        y = self.c_do_2(y, deterministic)
         return y
 
 class MLP(nn.Module):

@@ -7,47 +7,33 @@ import jax.numpy as jnp
 
 
 
-class SelfAttention(nn.Module):
+class CausalSelfAttention(nn.Module):
+    config: GPTConfig
 
-    num_heads: int
-    dtype: Any = jnp.float32
-    dropout_rate: float = 0.1
-    deterministic: Optional[bool] = None
+    def setup(self):
+        assert self.config.num_embeds % self.config.num_heads == 0
+        self.c_attn = nn.Dense(3 * self.config.num_embeds, dtype=self.config.dtype, name='c_attn')
+        self.c_proj = nn.Dense(self.config.num_embeds, dtype=self.config.dtype, name='c_proj')
 
-    @nn.compact
     def __call__(self, x, mask, deterministic=None):
+        B, T, C = x.shape 
+        
+        qkv = self.c_attn(x)
+        q, k, v = jnp.split(qkv, 3, axis=2)
+        k = k.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        q = q.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        v = v.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
 
-        B, T, C = x.shape
+        att = (q @ k.transpose(0, 1, 3, 2)) * (1.0 / jnp.sqrt(k.shape[-1])) # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        att = jnp.where(mask, att, jnp.finfo(self.config.dtype).min)
+        att = jax.nn.softmax(att, axis=-1)
+        att = nn.Dropout(self.config.dropout_rate)(att, deterministic)
+        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(0, 2, 1, 3).reshape(B, T, C)  # re-assemble all head outputs side by side
 
-        assert C % self.num_heads == 0
-        head_dim = C // self.num_heads
-
-        deterministic = nn.merge_param('deterministic', self.deterministic, deterministic)
-
-        # Construct qkv together a one single tensor
-        qkv=nn.DenseGeneral((3, self.num_heads, head_dim), dtype=self.dtype)(x) # out: (B, T, 3, num_heads, head_dim)
-
-        # split qkv at dim=2 into q, k, v of shape (B, T, num_heads, head_dim)
-        q, k, v = [x.squeeze(axis=2) for x in jnp.array_split(qkv, 3, axis=2)] # out: (B, T, num_heads, head_dim)
-
-        # normalizaing scalar in the self-attention formula
-        scale = 1.0 / jnp.sqrt(head_dim).astype(self.dtype)
-
-        # q, k: (B, T, num_heads, head_dim)
-        # transpose q, v so that batch dimensions are in front: (B, num_heads, T, head_dim)@(B, num_heads, head_dim, T)
-        attn = q.transpose((0,2,1,3))@k.transpose((0,2,3,1)) * scale # out: (B, num_heads, T, T)
-        attn = jnp.where(mask, attn, jnp.finfo(self.dtype).min) # out: (B, num_heads, T, T)
-
-        # input attn: (B, num_heads, T, T); apply softmax at last dimension (default)
-        attn = jax.nn.softmax(attn).astype(self.dtype) # out: (B, num_heads, T, T)
-        attn = nn.Dropout(self.dropout_rate)(attn, deterministic=deterministic) # out: (B, num_heads, T, T)
-
-        # v: (B, T, num_heads, head_dim), attn: (B, num_heads, T, T)
-        x=(attn@(v.transpose((0,2,1,3)))).transpose(0,2,1,3).reshape(B,T,C) # out: (B,T,C)
-        x = nn.Dense(C, dtype=self.dtype, name='c_proj')(x) # out: (B,T,C)
-        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic) # out: (B,T,C)
-
-        return x
+        y = self.c_proj(y)
+        y = nn.Dropout(self.config.dropout_rate)(y, deterministic)
+        return y
 
 class MLP(nn.Module):
     config: GPTConfig
@@ -66,9 +52,7 @@ class Block(nn.Module):
 
     def setup(self):
         self.ln_1 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype)
-        self.attn = SelfAttention(self.config.num_heads,
-                                  self.config.dtype,
-                                  dropout_rate=self.config.dropout_rate)
+        self.attn = CausalSelfAttention(self.config)
         self.ln_2 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype)
         self.mlp = MLP(self.config)
 
@@ -95,7 +79,7 @@ class GPT(nn.Module):
             x = Block(self.config, name=str(i))(x, attn_mask, deterministic=deterministic) # out: (B,T,num_embeds)
 
         x = nn.LayerNorm(1e-5, dtype=self.config.dtype, name='ln_f')(x) # out: (B,T,num_embeds)
-        logits = wte.attend(x)
+        logits = nn.Dense(self.config.vocab_size, use_bias=False, dtype=self.config.dtype, name='lm_head')(x)
         return logits
 
     def init(self, rng):

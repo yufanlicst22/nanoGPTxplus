@@ -1,6 +1,7 @@
 
 from typing import Any, Optional, Tuple
 from dataclasses import dataclass
+import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class GPTConfig:
@@ -13,7 +14,8 @@ class GPTConfig:
     num_heads: int = 12
     num_embeds: int = 768
     vocab_size=50257
-    dtype: Optional[str] = None
+    dtype_1: Optional[str] = jnp.float32
+    dtype_2: Optional[str] = jnp.bfloat16
     dropout_rate: float = 0.1
     block_size: int = 1024 # context length
 
@@ -22,7 +24,7 @@ class GPTConfig:
 
     # Calculate training durations
     token_per_batch = block_size * batch_size
-    n_params =  (num_embeds ** 2) * (12 * num_layers) + vocab_size * num_embeds
+    n_params =  (12*num_embeds**2 + 13*num_embeds) * (num_layers) + vocab_size * num_embeds + 2*num_embeds
     num_steps = int(CHINCHILLA_MULTIPLIER * n_params // token_per_batch)
 
     # Optimizer config

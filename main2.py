@@ -12,6 +12,7 @@ import pickle
 import time
 from config.GPT2 import GPTConfig
 from model import GPT
+import flax.linen as nn
 #from data.datanoam import NoamPackedIterableDataset
 
 #from transformers import BertTokenizer 
@@ -233,7 +234,7 @@ def main():
     print('Grad:',        f"{_grad_bytes/(1024**3):.2f} GiB (fp32)")
     print('Opt (Adam):',  f"{_opt_bytes/(1024**3):.2f} GiB (m+v fp32)")
     print('Activations (attn square tensor):', f"{_act_bytes_attn/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
-    print('Activations (others):', f"{_act_bytes_attn/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
+    print('Activations (others):', f"{_act_bytes_others/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
     print('=======================')
 
 

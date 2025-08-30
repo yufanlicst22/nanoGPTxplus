@@ -42,3 +42,6 @@ class GPTConfig:
 
     # Peak learning rate
     peak_lr = 1e-3
+
+    # Remat
+    remat_attn: bool = False

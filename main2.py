@@ -226,12 +226,14 @@ def main():
     _seq  = int(config.block_size)
     _h    = int(config.num_embeds)
     _nh   = int(config.num_heads)
-    _act_bytes = (config.num_layers * _seq * _bs * _h * (34.0 + (5.0 * _nh * _seq) / _h)) * _b_act
+    _act_bytes_attn = (config.num_layers * _seq * _bs * _h * ( (5.0 * _nh * _seq) / _h)) * _b_act
+    _act_bytes_others = (config.num_layers * _seq * _bs * _h * 34.0) * _b_act
 
-    print('Params:',      f"{config.n_params/1e6:.2f} M, {_param_bytes/(1024**3):.2f} GiB @ {jnp.dtype(config.dtype_1).name}")
+    print('Params:',      f"{_param_bytes/(1024**3):.2f} GiB @ {jnp.dtype(config.dtype_1).name}")
     print('Grad:',        f"{_grad_bytes/(1024**3):.2f} GiB (fp32)")
     print('Opt (Adam):',  f"{_opt_bytes/(1024**3):.2f} GiB (m+v fp32)")
-    print('Activations:', f"{_act_bytes/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
+    print('Activations (attn square tensor):', f"{_act_bytes_attn/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
+    print('Activations (others):', f"{_act_bytes_attn/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
     print('=======================')
 
 

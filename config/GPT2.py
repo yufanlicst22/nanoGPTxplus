@@ -21,7 +21,7 @@ class GPTConfig:
     block_size: int = 1024 # context length
 
     # Batch size
-    batch_size=16
+    batch_size=32
 
     # Calculate training durations
     token_per_batch = block_size * batch_size

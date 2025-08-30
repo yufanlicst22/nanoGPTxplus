@@ -112,6 +112,38 @@ def load_checkpoint(step, checkpoint_dir="checkpoints"):
 
     return train_state, iterator_state
 
+# ==== Profiling ====
+def print_device_memory(prefix=""):
+
+    # Make sure all pending work finished so numbers are meaningful
+    jax.block_until_ready(jnp.array(0))
+
+    def fmt(b):
+        return f"{b/(1024**3):.2f} GiB"
+
+    for i, dev in enumerate(jax.local_devices()):
+        try:
+            stats = dev.memory_stats()  # dict; keys vary by backend
+            used  = (stats.get("bytes_in_use")
+                     or stats.get("memory_in_use")
+                     or stats.get("current_bytes")
+                     or 0)
+            peak  = (stats.get("peak_bytes_in_use")
+                     or stats.get("peak_memory_in_use")
+                     or stats.get("peak_bytes")
+                     or None)
+            limit = (stats.get("bytes_limit")
+                     or stats.get("bytes_reserved")
+                     or stats.get("total_bytes")
+                     or None)
+            line = f"[{prefix}] dev{i} {dev.device_kind}: used={fmt(used)}"
+            if peak:  line += f", peak={fmt(peak)}"
+            if limit: line += f", limit={fmt(limit)}"
+            print(line)
+        except Exception as e:
+            print(f"[{prefix}] dev{i} {dev.device_kind}: memory_stats() not available ({e})")
+
+
 def main():
     # ===== Initialization =====
     config = GPTConfig
@@ -177,17 +209,32 @@ def main():
     print('Train steps: ', f'{config.num_steps / 10**3:.3f} K')
     print('Tokens per step: ', f'{config.token_per_batch // 10**3} K')
     print('=======================')
+    print(' ')
+    print('==== Memory Estimates (per device) ====')
+    # bytes per dtype
+    _b_param = int(jnp.dtype(config.dtype_1).itemsize)   # usually fp32 -> 4
+    _b_act   = int(jnp.dtype(config.dtype_2).itemsize)   # usually bf16 -> 2
 
-    print('==== Memory Estimates ====')
-    print('N:', f'{config.n_params // 10**6:.2f} M')
-    print('Width:', f'{config.num_embeds}')
-    print('Depth:', f'{config.num_layers}')
-    print('Batch size:', f'{config.batch_size}')
-    print('Context length:', f'{config.block_size}')
-    print('Number of heads:', f'{config.num_heads}')
-    print('Train steps: ', f'{config.num_steps / 10**3:.3f} K')
-    print('Tokens per step: ', f'{config.token_per_batch // 10**3} K')
+    # persistent (per replica)
+    _param_bytes = int(config.n_params) * _b_param                           # parameters stored in dtype_1
+    _grad_bytes  = int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # grads kept in fp32
+    _opt_bytes   = 2 * int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # Adam m+v (fp32)
+
+    # activations (mixed precision, no recompute):  m_act = L * seq * bs_per_device * h * (34 + 5*heads*seq/h)
+    _replicas = max(1, jax.local_device_count())
+    _bs   = int(config.batch_size // _replicas)  # per-device microbatch
+    _seq  = int(config.block_size)
+    _h    = int(config.num_embeds)
+    _nh   = int(config.num_heads)
+    _act_bytes = (config.num_layers * _seq * _bs * _h * (34.0 + (5.0 * _nh * _seq) / _h)) * _b_act
+
+    print('Params:',      f"{config.n_params/1e6:.2f} M, {_param_bytes/(1024**3):.2f} GiB @ {jnp.dtype(config.dtype_1).name}")
+    print('Grad:',        f"{_grad_bytes/(1024**3):.2f} GiB (fp32)")
+    print('Opt (Adam):',  f"{_opt_bytes/(1024**3):.2f} GiB (m+v fp32)")
+    print('Activations:', f"{_act_bytes/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
     print('=======================')
+
+
 
     # ===== Train loop =====
     start_time = time.time()
@@ -219,8 +266,7 @@ def main():
             print(f"step {step}, time: {elapsed_time:.1f}s, train_loss: {train_loss}, eval_loss: {val_loss:.4f}")
             if profiling:
                 print(f"train:{train_time/elapsed_time*100:.1f}%, eval:{eval_time/elapsed_time*100:.1f}%, data:{data_time/elapsed_time*100:.1f}%, chkpoint:{check_time/elapsed_time*100:.1f}%")
-                #print(f"train_state:{get_train_state_memory_size(train_state):.2f}GB, data:{tokens.size * tokens.itemsize/(1024**2):.2f}MB")
-                #log_memory()
+                print_device_memory(prefix=f"step {step}")
 
         # Generate new RNG keys for all devices
         keys = jax.random.split(key, jax.local_device_count())

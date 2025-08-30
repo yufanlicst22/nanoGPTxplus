@@ -1,6 +1,6 @@
 from typing import Tuple, Any
 from functools import partial
-import os
+import glob, os
 import jax
 import jax.numpy as jnp
 from flax.core import FrozenDict
@@ -329,12 +329,17 @@ def main():
         if tracing and (step >= profile_at_step + profile_num_steps):
             # ensure all device work is done before closing the trace
             _block_tree((loss, train_state))
+
+            prof_runs = sorted(glob.glob(os.path.join(tb_logdir, "plugins/profile", "*")))
+            run_dir = prof_runs[-1] if prof_runs else tb_logdir  # fallback just in case
+            jprof.save_device_memory_profile(os.path.join(run_dir, "device_memory_profile.pb"))
             jprof.stop_trace()
             tracing = False
+            print(run_dir)
             print(f"[Profiler] Trace finished at step {step}; open TensorBoard with:\n"
                   f"  tensorboard --logdir {tb_logdir}\n"
                   f"Then visit the 'Profile' tab → Trace Viewer / Memory.")
-                  
+
 if __name__ == "__main__":
     freeze_support()
     main()

@@ -29,7 +29,7 @@ def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]
 
     def loss_fn(params: FrozenDict) -> jnp.ndarray:
         logits = state.apply_fn(params, tokens[:, :-1], False, rngs={"dropout": dropout_key})
-        loss = optax.softmax_cross_entropy_with_integer_labels(logits, tokens[:, 1:]).mean()
+        loss = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), tokens[:, 1:]).mean()
         return loss
 
     loss, grads = jax.value_and_grad(loss_fn)(state.params)
@@ -64,7 +64,7 @@ def init_train_state(key, config) -> TrainState:
 @partial(jax.pmap, axis_name="batch")
 def eval_step(state: TrainState, tokens) -> jnp.ndarray:
     logits = state.apply_fn(state.params, tokens[:, :-1], True)
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, tokens[:, 1:])
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), tokens[:, 1:])
     loss = jax.lax.pmean(loss, axis_name="batch")
     return loss
 
@@ -166,8 +166,19 @@ def main():
     val_iterator = get_iter(config, 'test')
 
 
-    print('==== Diagnostics ====')
+    print('==== Train Specs ====')
     print(f"CPU cores: {multiprocessing.cpu_count()}, local devices: {jax.local_device_count()}")
+    print('N:', f'{config.n_params // 10**6:.2f} M')
+    print('Width:', f'{config.num_embeds}')
+    print('Depth:', f'{config.num_layers}')
+    print('Batch size:', f'{config.batch_size}')
+    print('Context length:', f'{config.block_size}')
+    print('Number of heads:', f'{config.num_heads}')
+    print('Train steps: ', f'{config.num_steps / 10**3:.3f} K')
+    print('Tokens per step: ', f'{config.token_per_batch // 10**3} K')
+    print('=======================')
+
+    print('==== Memory Estimates ====')
     print('N:', f'{config.n_params // 10**6:.2f} M')
     print('Width:', f'{config.num_embeds}')
     print('Depth:', f'{config.num_layers}')

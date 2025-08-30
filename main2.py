@@ -10,7 +10,7 @@ import flax.serialization
 import multiprocessing
 import pickle
 import time
-from config.scalable import GPTConfig
+from config.GPT2 import GPTConfig
 from model import GPT
 #from data.datanoam import NoamPackedIterableDataset
 

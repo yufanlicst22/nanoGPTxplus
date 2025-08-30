@@ -56,7 +56,10 @@ class Block(nn.Module):
 
     def setup(self):
         self.ln_1 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype_1)
-        self.attn = CausalSelfAttention(self.config)
+        if getattr(self.config, "remat_attn", True): 
+            self.attn = nn.remat(CausalSelfAttention, static_argnums=(3,), prevent_cse=True)(self.config)
+        else:
+            self.attn = CausalSelfAttention(self.config)
         self.ln_2 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype_1)
         self.mlp = MLP(self.config)
 

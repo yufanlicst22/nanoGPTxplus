@@ -1,3 +1,10 @@
-# .gitignore
+# Python bytecode
 __pycache__/
-*.pyccheckpoints/*
+*.pyc
+
+# Ignore everything inside the top-level "checkpoints" directory,
+# but allow a marker file so the directory itself stays in git.
+# (Note: we ignore contents with "/*", not the dir itself.)
+/checkpoints/*
+!/checkpoints/.gitkeep
+

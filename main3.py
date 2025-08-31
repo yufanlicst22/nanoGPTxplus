@@ -24,6 +24,8 @@ from datetime import datetime
 from jax.profiler import StepTraceAnnotation
 import jax.profiler as jprof
 
+from typing import Optional
+
 # === Training ===
 @partial(jax.pmap, axis_name="batch")
 def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]:
@@ -150,7 +152,24 @@ def _block_tree(x):
     # Ensures all async work is finished so the trace is complete/ordered.
     return jax.tree.map(lambda a: a.block_until_ready() if hasattr(a, "block_until_ready") else a, x)
 
-
+def _latest_tb_profile_host_dir(tb_logdir: str) -> Optional[str]:
+    base = os.path.join(tb_logdir, "plugins", "profile")
+    run_dirs = [d for d in glob.glob(os.path.join(base, "*")) if os.path.isdir(d)]
+    if not run_dirs:
+        return None
+    # Choose the newest run by modification time (safer than lexicographic sort)
+    latest_run = max(run_dirs, key=os.path.getmtime)
+    host_dirs = [d for d in glob.glob(os.path.join(latest_run, "*")) if os.path.isdir(d)]
+    if not host_dirs:
+        # Some setups write directly into the timestamp folder; fall back to it
+        return latest_run
+    # Prefer the host dir that already contains trace.json.gz or xplane.pb
+    for d in host_dirs:
+        files = set(os.listdir(d))
+        if "trace.json.gz" in files or "xplane.pb" in files:
+            return d
+    # Otherwise just pick the first host dir
+    return host_dirs[0]
 
 
 # ==== Main Train Loop ====
@@ -185,9 +204,9 @@ def main():
         return total_size_bytes/(1024**3)
     
     # ===== TensorBoard profiling settings =====
-    tb_logdir = os.getenv("TB_LOGDIR", f"./tb_logs/{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-    profile_at_step  = int(os.getenv("PROFILE_AT_STEP", 5))   # start after warmup & compile
-    profile_num_steps = int(os.getenv("PROFILE_NUM_STEPS", 3))# capture a tiny window
+    tb_logdir = config.tb_logdir
+    profile_at_step  = config.profile_at_step
+    profile_num_steps = config.profile_num_steps
     tracing = False
 
 
@@ -255,21 +274,18 @@ def main():
     print('=======================')
 
 
-
     # ===== Train loop =====
     start_time = time.time()
     step, use_checkpoint = 0, False
-    is_save_checkpoint = False
     profiling = True
     while step <= config.num_steps:
 
-        # TensorBoard Profiler
-        if (not tracing) and (step == profile_at_step):
+        # TensorBoard profiling: set prfile_at_step to be negative to avoid tracing
+        if (config.enable_tbprof) and (not tracing) and (step == profile_at_step):
             os.makedirs(tb_logdir, exist_ok=True)
             print(f"[Profiler] Starting trace at step {step} -> {tb_logdir}")
             jprof.start_trace(tb_logdir)
             tracing = True
-
 
         # Load check points
         if use_checkpoint:
@@ -320,22 +336,22 @@ def main():
         # Save checkpoint
         with StepTraceAnnotation("checkpoint", step_num=step):
             start_tmp = time.time()
-            if is_save_checkpoint and step % config.checkpoint_every_steps == 0:
+            if config.save_checkpoint and step % config.checkpoint_every_steps == 0:
                 save_checkpoint(train_state, train_iterator, step, checkpoint_dir)
             if profiling:
                 check_time += time.time() - start_tmp
 
         # ---- stop trace after N profiled steps ------------------------------
-        if tracing and (step >= profile_at_step + profile_num_steps):
+        if (config.enable_tbprof) and (tracing) and (step >= profile_at_step + profile_num_steps):
             # ensure all device work is done before closing the trace
             _block_tree((loss, train_state))
-
-            prof_runs = sorted(glob.glob(os.path.join(tb_logdir, "plugins/profile", "*")))
-            run_dir = prof_runs[-1] if prof_runs else tb_logdir  # fallback just in case
-            jprof.save_device_memory_profile(os.path.join(run_dir, "device_memory_profile.pb"))
             jprof.stop_trace()
             tracing = False
-            print(run_dir)
+
+            host_dir = _latest_tb_profile_host_dir(tb_logdir)
+            if host_dir is None: host_dir = tb_logdir
+            jprof.save_device_memory_profile(os.path.join(host_dir, "device_memory_profile.pb"))
+            
             print(f"[Profiler] Trace finished at step {step}; open TensorBoard with:\n"
                   f"  tensorboard --logdir {tb_logdir}\n"
                   f"Then visit the 'Profile' tab → Trace Viewer / Memory.")

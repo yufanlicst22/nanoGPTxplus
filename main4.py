@@ -30,6 +30,7 @@ from typing import Optional
 # === Training ===
 @partial(jax.pmap, axis_name="batch")
 def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]:
+
     dropout_key = jax.random.fold_in(key, state.step)
 
     def loss_fn(params: FrozenDict) -> jnp.ndarray:
@@ -86,6 +87,18 @@ def evaluate(state: TrainState, steps: int, eval_iterator: Any) -> jnp.ndarray:
 def shard_data(data):
     n_devices = jax.local_device_count()
     return data.reshape(n_devices, -1, *data.shape[1:])
+
+def shard_microbatches(data, grad_accum_steps: int):
+
+    n_devices = jax.local_device_count()
+    b = data.shape[0]
+    assert b % (n_devices * grad_accum_steps) == 0, (
+        f"Global batch {b} must be divisible by n_devices({n_devices}) * "
+        f"grad_accum_steps({grad_accum_steps})."
+    )
+    per_dev_micro = b // (n_devices * grad_accum_steps)
+    return data.reshape(n_devices, grad_accum_steps, per_dev_micro, *data.shape[1:])
+
 
 # === Manage check points ===
 def save_checkpoint(train_state, train_loader, step, checkpoint_dir="checkpoints"):

@@ -11,8 +11,8 @@ class GPTConfig:
     CHINCHILLA_MULTIPLIER = 20
 
     # Model hyperparameters
-    num_layers: int = 2 #12
-    num_heads: int = 2 #12
+    num_layers: int = 12 #12
+    num_heads: int = 12 #12
     num_embeds: int = 768
     vocab_size=50257
     dtype_1: DTypeLike = jnp.float32
@@ -21,7 +21,8 @@ class GPTConfig:
     block_size: int = 1024 # context length
 
     # Batch size
-    batch_size=8
+    batch_size: int = 128
+    grad_accum_steps: int = 4 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations
     token_per_batch = block_size * batch_size
@@ -34,21 +35,21 @@ class GPTConfig:
 
     # Eval
     eval_batch_size = 8
-    eval_every_steps = 400
+    eval_every_steps = 200
     eval_steps = 100
 
     # Check-pointing
-    save_checkpoint: bool = True
+    save_checkpoint: bool = False
     checkpoint_every_steps = 200
 
     # Peak learning rate
     peak_lr = 1e-3
 
     # Remat
-    remat_attn: bool = False
+    remat_attn: bool = True
 
     # Tensorboard profiling
-    enable_tbprof: bool = True
+    enable_tbprof: bool = False
     profile_at_step: int = 5 # start profiling at which step
     profile_num_steps: int = 3 # profile for how many steps
     tb_logdir: str = "./tb_logs/run3" # store output dir

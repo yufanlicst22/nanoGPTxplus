@@ -23,7 +23,7 @@ class GPTConfig:
     num_workers: int = 4
 
     # Batch size
-    batch_size: int = 64
+    batch_size: int = 128
     grad_accum_steps: int = 2 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations

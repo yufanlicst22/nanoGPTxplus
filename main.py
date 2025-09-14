@@ -291,29 +291,57 @@ def main():
     print(' ')
     print('==== Memory Estimates (per device) ====')
     # bytes per dtype
-    _b_param = int(jnp.dtype(config.dtype_1).itemsize)   # usually fp32 -> 4
-    _b_act   = int(jnp.dtype(config.dtype_2).itemsize)   # usually bf16 -> 2
+    _b_param = int(jnp.dtype(config.dtype_1).itemsize)   # typically fp32 -> 4
+    _b_act   = int(jnp.dtype(config.dtype_2).itemsize)   # typically bf16/fp16 -> 2
 
     # persistent (per replica)
-    _param_bytes = int(config.n_params) * _b_param                           # parameters stored in dtype_1
-    _grad_bytes  = int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # grads kept in fp32
-    _opt_bytes   = 2 * int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # Adam m+v (fp32)
+    _param_bytes = int(config.n_params) * _b_param
+    _grad_bytes  = int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)      # grads fp32
+    _opt_bytes   = 2 * int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # Adam m+v fp32
 
-    # activations (mixed precision, no recompute):  m_act = L * seq * bs_per_device * h * (34 + 5*heads*seq/h)
+    # per-device microbatch
     _replicas = max(1, jax.local_device_count())
-    _bs = int(config.batch_size // (_replicas * config.grad_accum_steps))  # per-device *micro*batch
-    _seq  = int(config.block_size)
-    _h    = int(config.num_embeds)
-    _nh   = int(config.num_heads)
-    _act_bytes_attn = (config.num_layers * _seq * _bs * _h * ( (5.0 * _nh * _seq) / _h)) * _b_act
-    _act_bytes_others = (config.num_layers * _seq * _bs * _h * 34.0) * _b_act
+    _bs  = int(config.batch_size // (_replicas * config.grad_accum_steps))   # microbatch / device
+    _seq = int(config.block_size)
+    _h   = int(config.num_embeds)
+    _nh  = int(config.num_heads)
+    _L   = int(config.num_layers)
+
+    # feature flags we trust for estimation
+    _remat_attn = bool(getattr(config, "remat_attn", False))
+    _remat_gelu = bool(getattr(config, "remat_gelu", False))
+
+    # --- Attention activations (pessimistic: always count T×T) ---
+    # Heuristic used in your code base:
+    #   attn bytes ≈ L * seq * bs * h * (5 * heads * seq / h) * bytes/act
+    _attn_factor = (5.0 * _nh * _seq) / _h
+    _act_bytes_attn_pess = (_L * _seq * _bs * _h * _attn_factor) * _b_act
+
+    # Best-case if we truly rematerialize the whole attn block: ~0 for T×T saved activations
+    _act_bytes_attn_best = 0.0 if _remat_attn else _act_bytes_attn_pess
+
+    # --- Other activations (your base 34.0 constant, minus a bit if remat_gelu) ---
+    _others_const = 34.0 - (1.0 if _remat_gelu else 0.0)
+    _others_const = max(_others_const, 0.0)
+    _act_bytes_others = (_L * _seq * _bs * _h * _others_const) * _b_act
 
     print('Params:',      f"{_param_bytes/(1024**3):.2f} GiB @ {jnp.dtype(config.dtype_1).name}")
     print('Grad:',        f"{_grad_bytes/(1024**3):.2f} GiB (fp32)")
     print('Opt (Adam):',  f"{_opt_bytes/(1024**3):.2f} GiB (m+v fp32)")
-    print('Activations (attn square tensor):', f"{_act_bytes_attn/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
-    print('Activations (others):', f"{_act_bytes_others/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
+
+    print("Activations (attn, pessimistic T×T):",
+        f"{_act_bytes_attn_pess/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name})")
+
+    if _remat_attn:
+        print("Activations (attn, best-case with remat_attn):",
+            f"{_act_bytes_attn_best/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name})")
+
+    _oth_lbl = "others" + (" (remat_gelu)" if _remat_gelu else "")
+    print(f"Activations ({_oth_lbl}):",
+        f"{_act_bytes_others/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name})")
     print('=======================')
+
+
 
 
     # ===== Train loop =====

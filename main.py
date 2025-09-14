@@ -27,6 +27,7 @@ import jax.profiler as jprof
 
 from collections import deque
 
+
 # === Training ===
 @partial(jax.pmap, axis_name="batch")
 def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]:
@@ -260,7 +261,8 @@ def main():
         return get_fw_dataloader(
             batch_size=config.batch_size,
             num_workers=config.num_workers,                      
-            stateful=True,                      
+            stateful=True,
+            prefetch_factor=config.prefetch_factor,                      
             repo="HuggingFaceFW/fineweb-edu",
             name="sample-10BT",
             block_size=config.block_size,
@@ -424,5 +426,11 @@ def main():
                   f"Then visit the 'Profile' tab → Trace Viewer / Memory.")
 
 if __name__ == "__main__":
+    import torch.multiprocessing as tmp
+    try:
+        tmp.set_start_method("spawn", force=True)  # safe with JAX, avoids fork
+    except RuntimeError:
+        pass
+    from torch.multiprocessing import freeze_support
     freeze_support()
     main()

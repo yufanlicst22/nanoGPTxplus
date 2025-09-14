@@ -19,15 +19,16 @@ class GPTConfig:
     use_flash: bool = True
 
     # Data load
-    fetchsize: int = 2
-    num_workers: int = 4
+    fetchsize: int = 2 # we prefetach and send to device
+    num_workers: int = 8
+    prefetch_factor: int = 4 # each worker prefatch how many batches
 
     # Batch size
-    batch_size: int = 64
+    batch_size: int = 64 # This is 512 for GPT-2
     grad_accum_steps: int = 2 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations
-    CHINCHILLA_MULTIPLIER = 20
+    CHINCHILLA_MULTIPLIER = 20 # This is about 80 for GPT-2
     token_per_batch = block_size * batch_size
     n_params =  (12*num_embeds**2 + 13*num_embeds) * (num_layers) + vocab_size * num_embeds + 2*num_embeds
     num_steps = int(CHINCHILLA_MULTIPLIER * n_params // token_per_batch)

@@ -9,6 +9,10 @@ try:
 except Exception:
     StatefulDataLoader = None 
 
+
+def collate_token_blocks(batch):
+    return torch.stack(batch, dim=0)  # [B, T+1]
+
 class FineWebPacked(IterableDataset):
     """
     Streams text -> token ids -> packed contiguous blocks of size `block_size`.
@@ -80,6 +84,8 @@ class FineWebPacked(IterableDataset):
         rng = random.Random(self.seed)
         ds = self._shard_for_workers()
 
+        self._worker_ds = ds
+
         # If we have a saved HF-streaming position, restore it for THIS worker view
         if self._resume_state is not None:
             hf_sd = self._resume_state.get("hf_ds")
@@ -115,17 +121,30 @@ class FineWebPacked(IterableDataset):
                 if self.max_tokens and emitted >= self.max_tokens:
                     return
 
-def get_dataloader(batch_size=8, num_workers=4, stateful=True, **kw):
+def get_dataloader(batch_size=8, num_workers=4, stateful=True, prefetch_factor=2, **kw):
     ds = FineWebPacked(**kw)
-    def collate(batch):
-        return torch.stack(batch, dim=0)  # [B, T+1]
-    dl_kwargs = dict(batch_size=batch_size, num_workers=num_workers,
-                     pin_memory=True, collate_fn=collate)
-    # avoid invalid arg when num_workers==0
+
+    # only pin if an accelerator is available (avoids the warning)
+    pin = (
+        torch.cuda.is_available()
+        or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+        or (hasattr(torch, "xpu") and getattr(torch.xpu, "is_available", lambda: False)())
+    )
+
+    dl_kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin,
+        collate_fn=collate_token_blocks,     # <-- top-level function (picklable under spawn)
+        multiprocessing_context="spawn",      # <-- critical for JAX compatibility
+    )
+
+    # avoid invalid args when num_workers == 0
     if num_workers > 0:
-        dl_kwargs.update(dict(prefetch_factor=2, persistent_workers=True))
+        dl_kwargs.update(dict(prefetch_factor=prefetch_factor, persistent_workers=True))
 
     if stateful and StatefulDataLoader is not None:
         return StatefulDataLoader(ds, **dl_kwargs)
     else:
         return DataLoader(ds, **dl_kwargs)
+

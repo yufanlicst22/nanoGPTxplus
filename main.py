@@ -1,6 +1,6 @@
 from typing import Tuple, Any
 from functools import partial
-import os
+import glob, os
 import jax
 import jax.numpy as jnp
 from flax.core import FrozenDict
@@ -10,31 +10,62 @@ import flax.serialization
 import multiprocessing
 import pickle
 import time
-from config.scalable import GPTConfig
+from config.GPT2 import GPTConfig
 from model import GPT
-from data.datanoam import NoamPackedIterableDataset
-
-from transformers import BertTokenizer 
+import flax.linen as nn
 from torch.utils.data import DataLoader, IterableDataset
-from datasets import load_dataset
+#from datasets import load_dataset
 import torch
 from torch.multiprocessing import freeze_support
+from flax import jax_utils
+
+from data.fineweb2 import get_dataloader as get_fw_dataloader
+
+from datetime import datetime
+from jax.profiler import StepTraceAnnotation
+import jax.profiler as jprof
+
+from typing import Optional
 
 # === Training ===
 @partial(jax.pmap, axis_name="batch")
 def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]:
-    dropout_key = jax.random.fold_in(key, state.step)
+    n_micro = tokens.shape[0]
 
-    def loss_fn(params: FrozenDict) -> jnp.ndarray:
-        logits = state.apply_fn(params, tokens[:, :-1], False, rngs={"dropout": dropout_key})
-        loss = optax.softmax_cross_entropy_with_integer_labels(logits, tokens[:, 1:]).mean()
-        return loss
+    base_key = jax.random.fold_in(key, state.step)
+    micro_keys = jax.random.split(base_key, n_micro)
 
-    loss, grads = jax.value_and_grad(loss_fn)(state.params)
-    grads = jax.lax.pmean(grads, axis_name="batch")  # Average gradients across devices
-    loss = jax.lax.pmean(loss, axis_name="batch")  # Average loss across devices
+    grads_zero = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+    def micro_body(carry, inputs):
+        grads_accum, loss_accum = carry
+        tok_i, k_i = inputs  # [micro_bsz_per_device, seq_len], PRNGKey
+
+        def loss_fn(params: FrozenDict) -> jnp.ndarray:
+            logits = state.apply_fn(params, tok_i[:, :-1], False, rngs={"dropout": k_i})
+            loss = optax.softmax_cross_entropy_with_integer_labels(
+                logits.astype(jnp.float32), tok_i[:, 1:]
+            ).mean()  # mean over (micro_bsz * (seq-1))
+            return loss
+        
+        loss_i, grads_i = jax.value_and_grad(loss_fn)(state.params)
+        grads_accum = jax.tree_util.tree_map(lambda a, b: a + b, grads_accum, grads_i)
+        loss_accum = loss_accum + loss_i
+        return (grads_accum, loss_accum), None
+
+    (grads_sum, loss_sum), _ = jax.lax.scan(
+        micro_body,
+        (grads_zero, jnp.array(0.0, dtype=jnp.float32)),
+        (tokens, micro_keys),
+    )
+
+    grads = jax.tree_util.tree_map(lambda g: g / n_micro, grads_sum)
+    loss = loss_sum / n_micro
+
+    grads = jax.lax.pmean(grads, axis_name="batch")
+    loss  = jax.lax.pmean(loss,  axis_name="batch")
     new_state = state.apply_gradients(grads=grads)
     return loss, new_state
+
 
 def init_train_state(key, config) -> TrainState:
     gpt = GPT(config)
@@ -62,7 +93,7 @@ def init_train_state(key, config) -> TrainState:
 @partial(jax.pmap, axis_name="batch")
 def eval_step(state: TrainState, tokens) -> jnp.ndarray:
     logits = state.apply_fn(state.params, tokens[:, :-1], True)
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, tokens[:, 1:])
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), tokens[:, 1:])
     loss = jax.lax.pmean(loss, axis_name="batch")
     return loss
 
@@ -80,35 +111,101 @@ def shard_data(data):
     n_devices = jax.local_device_count()
     return data.reshape(n_devices, -1, *data.shape[1:])
 
+def shard_microbatches(data, grad_accum_steps: int):
+
+    n_devices = jax.local_device_count()
+    b = data.shape[0]
+    assert b % (n_devices * grad_accum_steps) == 0, (
+        f"Global batch {b} must be divisible by n_devices({n_devices}) * "
+        f"grad_accum_steps({grad_accum_steps})."
+    )
+    per_dev_micro = b // (n_devices * grad_accum_steps)
+    return data.reshape(n_devices, grad_accum_steps, per_dev_micro, *data.shape[1:])
+
+
 # === Manage check points ===
-def save_checkpoint(train_state, train_iterator, step, checkpoint_dir="checkpoints"):
+def save_checkpoint(train_state, train_loader, step, checkpoint_dir="checkpoints"):
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{step}.msgpack")
-    iterator_state_path = os.path.join(checkpoint_dir, f"train_iterator_state_{step}.pkl")
+    loader_state_path = os.path.join(checkpoint_dir, f"dataloader_state_{step}.pkl")
 
-    # Save train state
+    # Save TrainState (host copy)
+    host_state = jax_utils.unreplicate(train_state) if isinstance(train_state, TrainState) else train_state
     with open(checkpoint_path, "wb") as f:
-        f.write(flax.serialization.to_bytes(train_state))
+        f.write(flax.serialization.to_bytes(host_state))
 
-    # Save train iterator state
-    with open(iterator_state_path, "wb") as f:
-        pickle.dump(train_iterator.get_state(), f)
+    # Save DataLoader state if supported (StatefulDataLoader)
+    dl_state = train_loader.state_dict() if hasattr(train_loader, "state_dict") else {}
+    with open(loader_state_path, "wb") as f:
+        pickle.dump(dl_state, f)
 
-def load_checkpoint(step, checkpoint_dir="checkpoints"):
+def load_checkpoint(step, config, checkpoint_dir="checkpoints"):
     checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{step}.msgpack")
-    iterator_state_path = os.path.join(checkpoint_dir, f"train_iterator_state_{step}.pkl")
+    loader_state_path = os.path.join(checkpoint_dir, f"dataloader_state_{step}.pkl")
 
-    # Load train state
+    template = init_train_state(jax.random.PRNGKey(0), config)
     with open(checkpoint_path, "rb") as f:
         train_state_bytes = f.read()
-    # Deserialize train_state using an initialized dummy TrainState
-    train_state = flax.serialization.from_bytes(init_train_state(jax.random.PRNGKey(0), config), train_state_bytes)
+    host_state = flax.serialization.from_bytes(template, train_state_bytes)
+    train_state = jax_utils.replicate(host_state)
 
-    # Load train iterator state
-    with open(iterator_state_path, "rb") as f:
-        iterator_state = pickle.load(f)
+    with open(loader_state_path, "rb") as f:
+        loader_state = pickle.load(f)
 
-    return train_state, iterator_state
+    return train_state, loader_state
+
+# ==== Profiling ====
+def print_device_memory(prefix=""):
+
+    # Make sure all pending work finished so numbers are meaningful
+    jax.block_until_ready(jnp.array(0))
+
+    def fmt(b):
+        return f"{b/(1024**3):.2f} GiB"
+
+    for i, dev in enumerate(jax.local_devices()):
+        try:
+            stats = dev.memory_stats()  # dict; keys vary by backend
+            used  = (stats.get("bytes_in_use")
+                     or stats.get("memory_in_use")
+                     or stats.get("current_bytes")
+                     or 0)
+            peak  = (stats.get("peak_bytes_in_use")
+                     or stats.get("peak_memory_in_use")
+                     or stats.get("peak_bytes")
+                     or None)
+            limit = (stats.get("bytes_limit")
+                     or stats.get("bytes_reserved")
+                     or stats.get("total_bytes")
+                     or None)
+            line = f"[{prefix}] dev{i} {dev.device_kind}: used={fmt(used)}"
+            if peak:  line += f", peak={fmt(peak)}"
+            if limit: line += f", limit={fmt(limit)}"
+            print(line)
+        except Exception as e:
+            print(f"[{prefix}] dev{i} {dev.device_kind}: memory_stats() not available ({e})")
+
+
+def _block_tree(x):
+    return jax.tree.map(lambda a: a.block_until_ready() if hasattr(a, "block_until_ready") else a, x)
+
+def _latest_tb_profile_host_dir(tb_logdir: str) -> Optional[str]:
+    base = os.path.join(tb_logdir, "plugins", "profile")
+    run_dirs = [d for d in glob.glob(os.path.join(base, "*")) if os.path.isdir(d)]
+    if not run_dirs:
+        return None
+    latest_run = max(run_dirs, key=os.path.getmtime)
+    host_dirs = [d for d in glob.glob(os.path.join(latest_run, "*")) if os.path.isdir(d)]
+    if not host_dirs:
+        return latest_run
+    for d in host_dirs:
+        files = set(os.listdir(d))
+        if "trace.json.gz" in files or "xplane.pb" in files:
+            return d
+    return host_dirs[0]
+
+
+# ==== Main Train Loop ====
 
 def main():
     # ===== Initialization =====
@@ -133,39 +230,43 @@ def main():
             print(key, f"{jax.local_devices()[0].memory_stats()[key]/(1024**3):.2f}GB")
 
     def get_train_state_memory_size(train_state):
-        # Traverse the tree and compute the size of each parameter
         param_sizes = jax.tree_util.tree_map(lambda x: x.size * x.itemsize if isinstance(x, jnp.ndarray) else 0, train_state)
-        # Sum all parameter sizes
         total_size_bytes = sum(jax.tree_util.tree_flatten(param_sizes)[0])
         return total_size_bytes/(1024**3)
+    
+    # ===== TensorBoard profiling settings =====
+    tb_logdir = config.tb_logdir
+    profile_at_step  = config.profile_at_step
+    profile_num_steps = config.profile_num_steps
+    tracing = False
+
 
     # Replicate train state for multi-device training
     train_state = jax.device_put_replicated(train_state, jax.local_devices())
 
     # Create data iterator
-    def get_iter(config, split):
-
-        # Load dataset and tokenizer
-        dataset = load_dataset("ag_news", split=split)
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-
-        # Create packed dataset
-        packed_dataset = NoamPackedIterableDataset(dataset, tokenizer, context_size=config.block_size)
-
-        # Create dataloader
-        dataloader = DataLoader(
-            packed_dataset,
+    def get_loader(config, split):
+        is_train = (split == "train")
+        return get_fw_dataloader(
             batch_size=config.batch_size,
-            num_workers=8,
-            pin_memory=True,
+            num_workers=4,                      
+            stateful=True,                      
+            repo="HuggingFaceFW/fineweb-edu",
+            name="sample-10BT",
+            block_size=config.block_size,
+            shuffle_buffer=10_000 if is_train else 5_000,
+            max_tokens=None,
+            seed=1337 if is_train else 4242,
+            take_docs=None,
         )
-        di = iter(dataloader)
-        return di
-    train_iterator = get_iter(config, 'train')
-    val_iterator = get_iter(config, 'test')
+
+    train_loader = get_loader(config, 'train')
+    val_loader   = get_loader(config, 'test')
+    train_iterator = iter(train_loader)
+    val_iterator   = iter(val_loader)
 
 
-    print('==== Diagnostics ====')
+    print('==== Train Specs ====')
     print(f"CPU cores: {multiprocessing.cpu_count()}, local devices: {jax.local_device_count()}")
     print('N:', f'{config.n_params // 10**6:.2f} M')
     print('Width:', f'{config.num_embeds}')
@@ -176,28 +277,63 @@ def main():
     print('Train steps: ', f'{config.num_steps / 10**3:.3f} K')
     print('Tokens per step: ', f'{config.token_per_batch // 10**3} K')
     print('=======================')
+    print(' ')
+    print('==== Memory Estimates (per device) ====')
+    # bytes per dtype
+    _b_param = int(jnp.dtype(config.dtype_1).itemsize)   # usually fp32 -> 4
+    _b_act   = int(jnp.dtype(config.dtype_2).itemsize)   # usually bf16 -> 2
+
+    # persistent (per replica)
+    _param_bytes = int(config.n_params) * _b_param                           # parameters stored in dtype_1
+    _grad_bytes  = int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # grads kept in fp32
+    _opt_bytes   = 2 * int(config.n_params) * int(jnp.dtype(jnp.float32).itemsize)  # Adam m+v (fp32)
+
+    # activations (mixed precision, no recompute):  m_act = L * seq * bs_per_device * h * (34 + 5*heads*seq/h)
+    _replicas = max(1, jax.local_device_count())
+    _bs = int(config.batch_size // (_replicas * config.grad_accum_steps))  # per-device *micro*batch
+    _seq  = int(config.block_size)
+    _h    = int(config.num_embeds)
+    _nh   = int(config.num_heads)
+    _act_bytes_attn = (config.num_layers * _seq * _bs * _h * ( (5.0 * _nh * _seq) / _h)) * _b_act
+    _act_bytes_others = (config.num_layers * _seq * _bs * _h * 34.0) * _b_act
+
+    print('Params:',      f"{_param_bytes/(1024**3):.2f} GiB @ {jnp.dtype(config.dtype_1).name}")
+    print('Grad:',        f"{_grad_bytes/(1024**3):.2f} GiB (fp32)")
+    print('Opt (Adam):',  f"{_opt_bytes/(1024**3):.2f} GiB (m+v fp32)")
+    print('Activations (attn square tensor):', f"{_act_bytes_attn/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
+    print('Activations (others):', f"{_act_bytes_others/(1024**3):.2f} GiB (dtype={jnp.dtype(config.dtype_2).name}, no recompute)")
+    print('=======================')
+
 
     # ===== Train loop =====
     start_time = time.time()
-    step, use_checkpoint = 0, False
-    is_save_checkpoint = False
+    step, use_checkpoint = 0, config.use_checkpoint
+    step = 0 if not config.use_checkpoint else config.start_from_step
     profiling = True
     while step <= config.num_steps:
 
+        # TensorBoard profiling: set prfile_at_step to be negative to avoid tracing
+        if (config.enable_tbprof) and (not tracing) and (step == profile_at_step):
+            os.makedirs(tb_logdir, exist_ok=True)
+            print(f"[Profiler] Starting trace at step {step} -> {tb_logdir}")
+            jprof.start_trace(tb_logdir)
+            tracing = True
+
         # Load check points
         if use_checkpoint:
-            train_state, train_iterator_state = load_checkpoint(step, checkpoint_dir)
-            train_iterator.set_state(train_iterator_state)
-            checkpoint = False
+            train_state, loader_state = load_checkpoint(step, config, checkpoint_dir)
+            train_loader.load_state_dict(loader_state)
+            train_iterator = iter(train_loader)
+            use_checkpoint = False
 
         # Evaluation
         if step % config.eval_every_steps == 0:
-
-            start_tmp = time.time()
-            val_loss = evaluate(train_state, config.eval_steps, val_iterator)
-            if profiling:
-                val_loss.block_until_ready()
-                eval_time += time.time() - start_tmp
+            with StepTraceAnnotation("eval", step_num=step):
+                start_tmp = time.time()
+                val_loss = evaluate(train_state, config.eval_steps, val_iterator)
+                if profiling:
+                    val_loss.block_until_ready()
+                    eval_time += time.time() - start_tmp
 
             val_loss_arr.append(val_loss)
             elapsed_time = time.time() - start_time
@@ -207,34 +343,52 @@ def main():
             print(f"step {step}, time: {elapsed_time:.1f}s, train_loss: {train_loss}, eval_loss: {val_loss:.4f}")
             if profiling:
                 print(f"train:{train_time/elapsed_time*100:.1f}%, eval:{eval_time/elapsed_time*100:.1f}%, data:{data_time/elapsed_time*100:.1f}%, chkpoint:{check_time/elapsed_time*100:.1f}%")
-                #print(f"train_state:{get_train_state_memory_size(train_state):.2f}GB, data:{tokens.size * tokens.itemsize/(1024**2):.2f}MB")
-                #log_memory()
+                print_device_memory(prefix=f"step {step}")
 
         # Generate new RNG keys for all devices
-        keys = jax.random.split(key, jax.local_device_count())
+        key, step_key = jax.random.split(key)
+        keys = jax.random.split(step_key, jax.local_device_count())
 
         # Prepare and shard the data
-        start_tmp = time.time()
-        tokens = jnp.array(next(train_iterator))
-        tokens_sharded = shard_data(tokens)  # Shard tokens for pmap
-        if profiling:
-            tokens_sharded.block_until_ready()
-            data_time += time.time() - start_tmp
+        with StepTraceAnnotation("data", step_num=step):
+            start_tmp = time.time()
+            tokens = jnp.array(next(train_iterator))
+            tokens_sharded = shard_microbatches(tokens, config.grad_accum_steps)
+            if profiling:
+                tokens_sharded.block_until_ready()
+                data_time += time.time() - start_tmp
 
         # Train step
-        start_tmp = time.time()
-        loss, train_state = train_step(train_state, keys, tokens_sharded)
-        step += 1
-        if profiling:
-            loss.block_until_ready()
-            train_time += time.time() - start_tmp
+        with StepTraceAnnotation("train", step_num=step):
+            start_tmp = time.time()
+            loss, train_state = train_step(train_state, keys, tokens_sharded)
+            step += 1
+            if profiling:
+                loss.block_until_ready()
+                train_time += time.time() - start_tmp
 
         # Save checkpoint
-        start_tmp = time.time()
-        if is_save_checkpoint and step % config.checkpoint_every_steps == 0:
-            save_checkpoint(train_state, train_iterator, step, checkpoint_dir)
-        if profiling:
-            check_time += time.time() - start_tmp
+        with StepTraceAnnotation("checkpoint", step_num=step):
+            start_tmp = time.time()
+            if config.save_checkpoint and step % config.checkpoint_every_steps == 0:
+                save_checkpoint(train_state, train_loader, step, checkpoint_dir)
+            if profiling:
+                check_time += time.time() - start_tmp
+
+        # ---- stop trace after N profiled steps ------------------------------
+        if (config.enable_tbprof) and (tracing) and (step >= profile_at_step + profile_num_steps):
+            # ensure all device work is done before closing the trace
+            _block_tree((loss, train_state))
+            jprof.stop_trace()
+            tracing = False
+
+            host_dir = _latest_tb_profile_host_dir(tb_logdir)
+            if host_dir is None: host_dir = tb_logdir
+            jprof.save_device_memory_profile(os.path.join(host_dir, "device_memory_profile.pb"))
+            
+            print(f"[Profiler] Trace finished at step {step}; open TensorBoard with:\n"
+                  f"  tensorboard --logdir {tb_logdir}\n"
+                  f"Then visit the 'Profile' tab → Trace Viewer / Memory.")
 
 if __name__ == "__main__":
     freeze_support()

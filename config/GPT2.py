@@ -11,8 +11,8 @@ class GPTConfig:
     CHINCHILLA_MULTIPLIER = 20
 
     # Model hyperparameters
-    num_layers: int = 12 #12
-    num_heads: int = 12 #12
+    num_layers: int = 2 #12
+    num_heads: int = 2 #12
     num_embeds: int = 768
     vocab_size=50257
     dtype_1: DTypeLike = jnp.float32
@@ -21,7 +21,7 @@ class GPTConfig:
     block_size: int = 1024 # context length
 
     # Batch size
-    batch_size: int = 128
+    batch_size: int = 8
     grad_accum_steps: int = 4 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations
@@ -40,7 +40,9 @@ class GPTConfig:
 
     # Check-pointing
     save_checkpoint: bool = False
+    use_checkpoint: bool = False
     checkpoint_every_steps = 200
+    start_from_step: int = 0 # load and start from which check point; does not matter when use_checkpoint is 0
 
     # Peak learning rate
     peak_lr = 1e-3

@@ -1,4 +1,4 @@
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 from functools import partial
 import glob, os
 import jax
@@ -25,7 +25,7 @@ from datetime import datetime
 from jax.profiler import StepTraceAnnotation
 import jax.profiler as jprof
 
-from typing import Optional
+from collections import deque
 
 # === Training ===
 @partial(jax.pmap, axis_name="batch")
@@ -121,6 +121,17 @@ def shard_microbatches(data, grad_accum_steps: int):
     )
     per_dev_micro = b // (n_devices * grad_accum_steps)
     return data.reshape(n_devices, grad_accum_steps, per_dev_micro, *data.shape[1:])
+
+
+def prefetch_to_device(iterator, size=2):
+    queue = deque()
+    for _ in range(size):
+        batch = jnp.array(next(iterator))
+        queue.append(jax.device_put(batch))
+    while True:
+        yield queue.popleft()
+        batch = jnp.array(next(iterator))
+        queue.append(jax.device_put(batch))
 
 
 # === Manage check points ===
@@ -248,7 +259,7 @@ def main():
         is_train = (split == "train")
         return get_fw_dataloader(
             batch_size=config.batch_size,
-            num_workers=4,                      
+            num_workers=config.num_workers,                      
             stateful=True,                      
             repo="HuggingFaceFW/fineweb-edu",
             name="sample-10BT",
@@ -260,9 +271,10 @@ def main():
         )
 
     train_loader = get_loader(config, 'train')
-    val_loader   = get_loader(config, 'test')
-    train_iterator = iter(train_loader)
-    val_iterator   = iter(val_loader)
+    train_iterator = prefetch_to_device(iter(train_loader), size=config.fetchsize)
+    if config.use_eval:
+        val_loader   = get_loader(config, 'test') 
+        val_iterator   = iter(val_loader)
 
 
     print('==== Train Specs ====')
@@ -329,17 +341,21 @@ def main():
         if step % config.eval_every_steps == 0:
             with StepTraceAnnotation("eval", step_num=step):
                 start_tmp = time.time()
-                val_loss = evaluate(train_state, config.eval_steps, val_iterator)
+                if config.use_eval:
+                    val_loss = evaluate(train_state, config.eval_steps, val_iterator)
+                    val_loss_arr.append(val_loss)
                 if config.profiling:
                     val_loss.block_until_ready()
                     eval_time += time.time() - start_tmp
 
-            val_loss_arr.append(val_loss)
+            
             elapsed_time = time.time() - start_time
-
             train_loss = loss[0] if (jax.local_device_count()>1 and step>0) else loss
 
-            print(f"step {step}, time: {elapsed_time:.1f}s, speed: {config.token_per_batch*(step-first_step)/elapsed_time:.3f}tokens per s, train_loss: {train_loss[0]}, eval_loss: {val_loss:.4f}")
+            msg = f"step {step}, time: {elapsed_time:.1f}s, speed: {config.token_per_batch*(step-first_step)/elapsed_time:.3f}toks/s, train_loss: {train_loss}"
+            msg += ", eval_loss: {val_loss:.4f}" if config.use_eval else ""
+            print(msg)
+
             if config.profiling:
                 print(f"train:{train_time/elapsed_time*100:.1f}%, eval:{eval_time/elapsed_time*100:.1f}%, data:{data_time/elapsed_time*100:.1f}%, chkpoint:{check_time/elapsed_time*100:.1f}%")
                 print_device_memory(prefix=f"step {step}")

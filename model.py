@@ -4,40 +4,104 @@ from typing import Any, Optional, Tuple
 import jax
 from config.scalable import GPTConfig
 import jax.numpy as jnp
+from flax.linen.attention import dot_product_attention
 
 
+
+# class CausalSelfAttention(nn.Module):
+#     config: GPTConfig
+
+#     def setup(self):
+#         assert self.config.num_embeds % self.config.num_heads == 0
+#         self.c_attn = nn.Dense(3 * self.config.num_embeds, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='c_attn')
+#         self.c_proj = nn.Dense(self.config.num_embeds, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='c_proj')
+#         self.c_do_1 = nn.Dropout(self.config.dropout_rate)
+#         self.c_do_2 = nn.Dropout(self.config.dropout_rate)
+
+#     def __call__(self, x, mask, deterministic=None):
+#         B, T, C = x.shape 
+        
+#         qkv = self.c_attn(x)
+#         q, k, v = jnp.split(qkv, 3, axis=2)
+#         k = k.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+#         q = q.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+#         v = v.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+
+#         scale = jnp.array(1.0 / jnp.sqrt(k.shape[-1]), dtype=self.config.dtype_2)
+#         att = (q @ k.transpose(0, 1, 3, 2)) * scale # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+#         att = att.astype(self.config.dtype_1)
+#         att = jnp.where(mask, att, jnp.finfo(self.config.dtype_1).min)
+#         att = jax.nn.softmax(att, axis=-1).astype(self.config.dtype_2)
+#         att = self.c_do_1(att, deterministic)
+#         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+#         y = y.transpose(0, 2, 1, 3).reshape(B, T, C)  # re-assemble all head outputs side by side
+
+#         y = self.c_proj(y)
+#         y = self.c_do_2(y, deterministic)
+#         return y
 
 class CausalSelfAttention(nn.Module):
     config: GPTConfig
 
     def setup(self):
         assert self.config.num_embeds % self.config.num_heads == 0
-        self.c_attn = nn.Dense(3 * self.config.num_embeds, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='c_attn')
-        self.c_proj = nn.Dense(self.config.num_embeds, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='c_proj')
+        self.c_attn = nn.Dense(3 * self.config.num_embeds, dtype=self.config.dtype_2,
+                               param_dtype=self.config.dtype_1, name='c_attn')
+        self.c_proj = nn.Dense(self.config.num_embeds, dtype=self.config.dtype_2,
+                               param_dtype=self.config.dtype_1, name='c_proj')
         self.c_do_1 = nn.Dropout(self.config.dropout_rate)
         self.c_do_2 = nn.Dropout(self.config.dropout_rate)
 
     def __call__(self, x, mask, deterministic=None):
-        B, T, C = x.shape 
-        
-        qkv = self.c_attn(x)
-        q, k, v = jnp.split(qkv, 3, axis=2)
-        k = k.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
-        q = q.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
-        v = v.reshape(B, T, self.config.num_heads, C // self.config.num_heads).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        B, T, C = x.shape
+        nh = self.config.num_heads
+        hs = C // nh
 
-        scale = jnp.array(1.0 / jnp.sqrt(k.shape[-1]), dtype=self.config.dtype_2)
-        att = (q @ k.transpose(0, 1, 3, 2)) * scale # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        att = att.astype(self.config.dtype_1)
-        att = jnp.where(mask, att, jnp.finfo(self.config.dtype_1).min)
-        att = jax.nn.softmax(att, axis=-1).astype(self.config.dtype_2)
-        att = self.c_do_1(att, deterministic)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(0, 2, 1, 3).reshape(B, T, C)  # re-assemble all head outputs side by side
+        # QKV projections (keep in activation dtype, e.g., bf16)
+        qkv = self.c_attn(x).astype(self.config.dtype_2)
+        q, k, v = jnp.split(qkv, 3, axis=-1)
+        q = q.reshape(B, T, nh, hs).astype(self.config.dtype_2)
+        k = k.reshape(B, T, nh, hs).astype(self.config.dtype_2)
+        v = v.reshape(B, T, nh, hs).astype(self.config.dtype_2)
 
+        if self.config.use_flash:
+            # Convert boolean mask to additive bias (0 for keep, -inf for masked)
+            # Expected shape broadcastable to (B, nh, T, T). nn.make_causal_mask already gives (B, 1, T, T).
+            # If you have a padding mask, combine with combine_masks(pad_mask, causal_mask).
+            big_neg = jnp.finfo(jnp.float32).min
+            attn_bias = jnp.where(mask, 0.0, big_neg).astype(jnp.float32)
+
+            # Fused SDPA path (Flash-style). Flax handles scaling + softmax in fp32 internally.
+            y = dot_product_attention(
+                q, k, v,
+                bias=attn_bias,                               # mask is (B,1,T,T) → broadcasts over heads
+                dropout_rng=self.make_rng("dropout"),
+                dropout_rate=self.config.dropout_rate,
+                deterministic=deterministic,
+                dtype=self.config.dtype_2,
+            )
+            y = y.reshape(B, T, C)
+        else:
+            # (B, T, nh, hs) -> (B, nh, T, hs)
+            def _reshape(a):
+                return a.reshape(B, T, nh, hs).transpose(0, 2, 1, 3).astype(self.config.dtype_2)
+
+            q, k, v = map(_reshape, (q, k, v))
+            # Fallback (explicit attention)
+            scale = jnp.array(1.0 / jnp.sqrt(hs), dtype=self.config.dtype_2)
+            att = (q @ k.transpose(0, 1, 3, 2)) * scale
+            att = att.astype(self.config.dtype_1)  # fp32 for softmax
+            att = jnp.where(mask, att, jnp.finfo(self.config.dtype_1).min)
+            att = jax.nn.softmax(att, axis=-1).astype(self.config.dtype_2)
+            att = self.c_do_1(att, deterministic)
+            y = att @ v
+            y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
+
+        # (B, nh, T, hs) -> (B, T, C)
         y = self.c_proj(y)
         y = self.c_do_2(y, deterministic)
         return y
+
 
 class MLP(nn.Module):
     config: GPTConfig

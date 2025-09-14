@@ -7,24 +7,27 @@ import jax.numpy as jnp
 @dataclass(frozen=True)
 class GPTConfig:
 
-    # How many tokens per param
-    CHINCHILLA_MULTIPLIER = 20
-
     # Model hyperparameters
-    num_layers: int = 2 #12
-    num_heads: int = 2 #12
+    num_layers: int = 12 #12
+    num_heads: int = 12 #12
     num_embeds: int = 768
     vocab_size=50257
     dtype_1: DTypeLike = jnp.float32
     dtype_2: DTypeLike = jnp.bfloat16
     dropout_rate: float = 0.1
     block_size: int = 1024 # context length
+    use_flash: bool = True
+
+    # Data load
+    fetchsize: int = 2
+    num_workers: int = 4
 
     # Batch size
-    batch_size: int = 8
-    grad_accum_steps: int = 4 # microbatch size = batch_size / (num_device * grad_accum_steps)
+    batch_size: int = 64
+    grad_accum_steps: int = 1 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations
+    CHINCHILLA_MULTIPLIER = 20
     token_per_batch = block_size * batch_size
     n_params =  (12*num_embeds**2 + 13*num_embeds) * (num_layers) + vocab_size * num_embeds + 2*num_embeds
     num_steps = int(CHINCHILLA_MULTIPLIER * n_params // token_per_batch)
@@ -34,6 +37,7 @@ class GPTConfig:
     warmup_steps = int(0.1*num_steps)
 
     # Eval
+    use_eval: bool = False
     eval_batch_size = 8
     eval_every_steps = 200
     eval_steps = 100
@@ -48,7 +52,7 @@ class GPTConfig:
     peak_lr = 1e-3
 
     # Remat
-    remat_attn: bool = False
+    remat_attn: bool = True
 
     # Wallclock profiling 
     profiling: bool = False # True will show time spent on train, data etc but will invoke

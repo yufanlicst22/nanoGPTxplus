@@ -155,7 +155,12 @@ class GPT(nn.Module):
             x = Block(self.config, name=str(i))(x, attn_mask, deterministic=deterministic) # out: (B,T,num_embeds)
 
         x = nn.LayerNorm(1e-5, dtype=self.config.dtype_1, name='ln_f')(x) # out: (B,T,num_embeds)
-        logits = nn.Dense(self.config.vocab_size, use_bias=False, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='lm_head')(x)
+        
+        if self.config.tie_embeddings:
+            logits = wte.attend(x)
+        else:
+            logits = nn.Dense(self.config.vocab_size, use_bias=False, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='lm_head')(x)
+        
         return logits
 
     def init(self, rng):

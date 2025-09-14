@@ -17,6 +17,8 @@ class GPTConfig:
     dropout_rate: float = 0.0
     block_size: int = 1024 # context length
     use_flash: bool = True
+    tie_embeddings: bool = True  # tie wte <-> lm_head
+    
 
     # Data load
     fetchsize: int = 2 # we prefetach and send to device

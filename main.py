@@ -240,7 +240,6 @@ def main():
     profile_num_steps = config.profile_num_steps
     tracing = False
 
-
     # Replicate train state for multi-device training
     train_state = jax.device_put_replicated(train_state, jax.local_devices())
 
@@ -309,7 +308,7 @@ def main():
     start_time = time.time()
     step, use_checkpoint = 0, config.use_checkpoint
     step = 0 if not config.use_checkpoint else config.start_from_step
-    profiling = True
+    first_step = step
     while step <= config.num_steps:
 
         # TensorBoard profiling: set prfile_at_step to be negative to avoid tracing
@@ -331,7 +330,7 @@ def main():
             with StepTraceAnnotation("eval", step_num=step):
                 start_tmp = time.time()
                 val_loss = evaluate(train_state, config.eval_steps, val_iterator)
-                if profiling:
+                if config.profiling:
                     val_loss.block_until_ready()
                     eval_time += time.time() - start_tmp
 
@@ -340,8 +339,8 @@ def main():
 
             train_loss = loss[0] if (jax.local_device_count()>1 and step>0) else loss
 
-            print(f"step {step}, time: {elapsed_time:.1f}s, train_loss: {train_loss}, eval_loss: {val_loss:.4f}")
-            if profiling:
+            print(f"step {step}, time: {elapsed_time:.1f}s, speed: {config.token_per_batch*(step-first_step)/elapsed_time:.3f}tokens per s, train_loss: {train_loss[0]}, eval_loss: {val_loss:.4f}")
+            if config.profiling:
                 print(f"train:{train_time/elapsed_time*100:.1f}%, eval:{eval_time/elapsed_time*100:.1f}%, data:{data_time/elapsed_time*100:.1f}%, chkpoint:{check_time/elapsed_time*100:.1f}%")
                 print_device_memory(prefix=f"step {step}")
 
@@ -354,7 +353,7 @@ def main():
             start_tmp = time.time()
             tokens = jnp.array(next(train_iterator))
             tokens_sharded = shard_microbatches(tokens, config.grad_accum_steps)
-            if profiling:
+            if config.profiling:
                 tokens_sharded.block_until_ready()
                 data_time += time.time() - start_tmp
 
@@ -363,7 +362,7 @@ def main():
             start_tmp = time.time()
             loss, train_state = train_step(train_state, keys, tokens_sharded)
             step += 1
-            if profiling:
+            if config.profiling:
                 loss.block_until_ready()
                 train_time += time.time() - start_tmp
 
@@ -372,7 +371,7 @@ def main():
             start_tmp = time.time()
             if config.save_checkpoint and step % config.checkpoint_every_steps == 0:
                 save_checkpoint(train_state, train_loader, step, checkpoint_dir)
-            if profiling:
+            if config.profiling:
                 check_time += time.time() - start_tmp
 
         # ---- stop trace after N profiled steps ------------------------------

@@ -42,13 +42,16 @@ class GPTConfig:
     save_checkpoint: bool = False
     use_checkpoint: bool = False
     checkpoint_every_steps = 200
-    start_from_step: int = 0 # load and start from which check point; does not matter when use_checkpoint is 0
+    start_from_step: int = 200 # load and start from which check point; does not matter when use_checkpoint is 0
 
     # Peak learning rate
     peak_lr = 1e-3
 
     # Remat
-    remat_attn: bool = True
+    remat_attn: bool = False
+
+    # Wallclock profiling 
+    profiling: bool = False # True will show time spent on train, data etc but will invoke
 
     # Tensorboard profiling
     enable_tbprof: bool = False

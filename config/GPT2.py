@@ -14,7 +14,7 @@ class GPTConfig:
     vocab_size=50257
     dtype_1: DTypeLike = jnp.float32
     dtype_2: DTypeLike = jnp.bfloat16
-    dropout_rate: float = 0.1
+    dropout_rate: float = 0.0
     block_size: int = 1024 # context length
     use_flash: bool = True
 
@@ -24,7 +24,7 @@ class GPTConfig:
 
     # Batch size
     batch_size: int = 64
-    grad_accum_steps: int = 1 # microbatch size = batch_size / (num_device * grad_accum_steps)
+    grad_accum_steps: int = 2 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations
     CHINCHILLA_MULTIPLIER = 20
@@ -53,6 +53,7 @@ class GPTConfig:
 
     # Remat
     remat_attn: bool = True
+    remat_gelu: bool = True
 
     # Wallclock profiling 
     profiling: bool = False # True will show time spent on train, data etc but will invoke

@@ -110,7 +110,12 @@ class MLP(nn.Module):
     def __call__(self, x, deterministic=None):
         B, T, C = x.shape
         x = nn.Dense(4 * C, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='c_fc')(x)
-        x = nn.gelu(x, approximate=True)
+        
+        if getattr(self.config, "remat_gelu", False):
+            x = jax.checkpoint(lambda y: nn.gelu(y, approximate=True), prevent_cse=True)(x)
+        else:
+            x = nn.gelu(x, approximate=True)
+
         x = nn.Dense(C, dtype=self.config.dtype_2, param_dtype=self.config.dtype_1, name='c_proj')(x)
         x = nn.Dropout(self.config.dropout_rate)(x, deterministic)
         return x

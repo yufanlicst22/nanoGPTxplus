@@ -23,7 +23,7 @@ class GPTConfig:
     num_workers: int = 4
 
     # Batch size
-    batch_size: int = 128
+    batch_size: int = 64
     grad_accum_steps: int = 2 # microbatch size = batch_size / (num_device * grad_accum_steps)
 
     # Calculate training durations
@@ -56,7 +56,7 @@ class GPTConfig:
     remat_gelu: bool = True
 
     # Wallclock profiling 
-    profiling: bool = False # True will show time spent on train, data etc but will invoke
+    profiling: bool = True # True will show time spent on train, data etc but will invoke
 
     # Tensorboard profiling
     enable_tbprof: bool = False

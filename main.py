@@ -362,7 +362,7 @@ def main():
                 if config.use_eval:
                     val_loss = evaluate(train_state, config.eval_steps, val_iterator)
                     val_loss_arr.append(val_loss)
-                if config.profiling:
+                if config.profiling and config.use_eval:
                     val_loss.block_until_ready()
                     eval_time += time.time() - start_tmp
 

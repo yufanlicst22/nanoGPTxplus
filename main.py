@@ -29,7 +29,7 @@ from collections import deque
 
 
 # === Training ===
-@partial(jax.pmap, axis_name="batch")
+@partial(jax.pmap, axis_name="batch", donate_argnums=(0, 2))
 def train_step(state: TrainState, key, tokens) -> Tuple[jnp.ndarray, TrainState]:
     n_micro = tokens.shape[0]
 
